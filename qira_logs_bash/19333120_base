@@ -1,0 +1,10 @@
+0000563759cb4000-0000563759ddf298 0 /usr/bin/bash
+00007fdfe3180000-00007fdfe3180fc8 fffffffffffff000 /lib64/ld-linux-x86-64.so.2
+00007fdfe3181000-00007fdfe31a35e4 0 /lib64/ld-linux-x86-64.so.2
+00007fdfe31a4000-00007fdfe31abc8c 23000 /lib64/ld-linux-x86-64.so.2
+00007fdfe31ad520-00007fdfe31af190 2c520 /lib64/ld-linux-x86-64.so.2
+00007ffea37f4000-00007ffea37f4a3c 0 [vdso]
+00007fdfcf852000-00007fdfcf881980 0 /lib/x86_64-linux-gnu/libtinfo.so.6
+00007fdfcf8a5000-00007fdfcf8aa110 0 /lib/x86_64-linux-gnu/libdl.so.2
+00007fdfcf64a000-00007fdfcf83b4d8 0 /lib/x86_64-linux-gnu/libc.so.6
+00007fdfced83000-00007fdfced96738 0 /lib/x86_64-linux-gnu/libnss_files.so.2
