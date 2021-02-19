@@ -110,246 +110,246 @@ import ghidra.util.database.UndoableTransaction;
  * unit is encountered, or there are no remaining byte changes.
  */
 public class PopulateTraceQiraCompatible extends GhidraScript {
-	private Language lang;
-	private CompilerSpec cspec;
-	private Trace trace;
-	private TraceMemoryManager memory;
-	private TraceModuleManager modules;
-	private TraceThreadManager threads;
-	private TraceTimeManager timeManager;
+    private Language lang;
+    private CompilerSpec cspec;
+    private Trace trace;
+    private TraceMemoryManager memory;
+    private TraceModuleManager modules;
+    private TraceThreadManager threads;
+    private TraceTimeManager timeManager;
 
-	private AddressSpace defaultSpace;
+    private AddressSpace defaultSpace;
 
-	private DebuggerTraceManagerService manager;
-	
-	private String tracePath;
+    private DebuggerTraceManagerService manager;
+    
+    private String tracePath;
 
-	/**
-	 * Maps an (ELF Path, offset) pair to the file containing the region bytes.
-	 */
-	Map<Pair<String, Long>, File> imagesMap;
-	
-	private static final Map<Long, String> register_map = createRegisterMap();
-	
-	/**
-	 * Create the mapping between Qira register address and X86 register name
-	 * 
-	 * @return the mapping
-	 */
-	protected static Map<Long, String> createRegisterMap() {
-		Map <Long, String> result = new HashMap<Long, String>();
-		result.put(0x00L, "RAX");
-		result.put(0x08L, "RCX");
-		result.put(0x10L, "RDX");
-		result.put(0x18L, "RBX");
-		result.put(0x20L, "RSP");
-		result.put(0x28L, "RBP");
-		result.put(0x30L, "RSI");
-		result.put(0x38L, "RDI");
-		result.put(0x40L, "R8");
-		result.put(0x48L, "R9");
-		result.put(0x50L, "R10");
-		result.put(0x58L, "R11");
-		result.put(0x60L, "R12");
-		result.put(0x68L, "R13");
-		result.put(0x70L, "R14");
-		result.put(0x78L, "R15");
-		result.put(0x80l, "RIP");
-		return result;
-	}
-	
-	final int IS_VALID   = 0x80000000;
-	final int IS_WRITE   = 0x40000000;
-	final int IS_MEM     = 0x20000000;
-	final int IS_START   = 0x10000000;
-	final int IS_SYSCALL = 0x08000000;
-	final int SIZE_MASK  = 0xFF;
+    /**
+     * Maps an (ELF Path, offset) pair to the file containing the region bytes.
+     */
+    Map<Pair<String, Long>, File> imagesMap;
+    
+    private static final Map<Long, String> register_map = createRegisterMap();
+    
+    /**
+     * Create the mapping between Qira register address and X86 register name
+     * 
+     * @return the mapping
+     */
+    protected static Map<Long, String> createRegisterMap() {
+        Map <Long, String> result = new HashMap<Long, String>();
+        result.put(0x00L, "RAX");
+        result.put(0x08L, "RCX");
+        result.put(0x10L, "RDX");
+        result.put(0x18L, "RBX");
+        result.put(0x20L, "RSP");
+        result.put(0x28L, "RBP");
+        result.put(0x30L, "RSI");
+        result.put(0x38L, "RDI");
+        result.put(0x40L, "R8");
+        result.put(0x48L, "R9");
+        result.put(0x50L, "R10");
+        result.put(0x58L, "R11");
+        result.put(0x60L, "R12");
+        result.put(0x68L, "R13");
+        result.put(0x70L, "R14");
+        result.put(0x78L, "R15");
+        result.put(0x80l, "RIP");
+        return result;
+    }
+    
+    final int IS_VALID   = 0x80000000;
+    final int IS_WRITE   = 0x40000000;
+    final int IS_MEM     = 0x20000000;
+    final int IS_START   = 0x10000000;
+    final int IS_SYSCALL = 0x08000000;
+    final int SIZE_MASK  = 0xFF;
 
-	/**
-	 * Create an address in the processor's (x86_64) default space.
-	 * 
-	 * @param offset the byte offset
-	 * @return the address
-	 */
-	protected Address addr(long offset) {
-		return defaultSpace.getAddress(offset);
-	}
+    /**
+     * Create an address in the processor's (x86_64) default space.
+     * 
+     * @param offset the byte offset
+     * @return the address
+     */
+    protected Address addr(long offset) {
+        return defaultSpace.getAddress(offset);
+    }
 
-	/**
-	 * Create an address range in the processor's default space.
-	 * 
-	 * @param min the minimum byte offset
-	 * @param max the maximum (inclusive) byte offset
-	 * @return the range
-	 */
-	protected AddressRange rng(long min, long max) {
-		return new AddressRangeImpl(addr(min), addr(max));
-	}
+    /**
+     * Create an address range in the processor's default space.
+     * 
+     * @param min the minimum byte offset
+     * @param max the maximum (inclusive) byte offset
+     * @return the range
+     */
+    protected AddressRange rng(long min, long max) {
+        return new AddressRangeImpl(addr(min), addr(max));
+    }
 
-	/**
-	 * Get a register by name
-	 * 
-	 * @param name the name
-	 * @return the register
-	 */
-	protected Register reg(String name) {
-		return lang.getRegister(name);
-	}
-	
-	/**
-	 * Parses the "_images" directory.
-	 * 
-	 * For -standalone traces, we explore the files in _images and create a Map<Pair<Filename, Offset>, File>
-	 * @throws UnsupportedEncodingException
-	 */
-	protected void parseImages() throws UnsupportedEncodingException {
-		imagesMap = new HashMap<>();
-		
-		File imagesDir = new File(tracePath + "_images");
-		for(File imageFile : imagesDir.listFiles()) {
-			String path = URLDecoder.decode(imageFile.getName(), "utf-8");
-			
-			if(imageFile.isDirectory()) {
-				// The regions are split in the traces, create an entry for each one
-				for(File regionFile : imageFile.listFiles()) {
-					long offset = Long.parseUnsignedLong(regionFile.getName(), 16);
-					imagesMap.put(new Pair<>(path, offset), regionFile);
-				}
-			} else {
-				// The whole image is contained in a single file
-				imagesMap.put(new Pair<>(path, 0L), imageFile);
-			}
-		}
-	}
-	
-	/**
-	 * Parses the "_base" file
-	 * 
-	 * The file lists the different ELFs that are loaded in memory, similar to /proc/<pid>/maps.
-	 * For each file, we create a Module. For each loaded program segment, we create a Region and fill it with the content from _images.
-	 * 
-	 * @throws Exception
-	 */
-	protected void parseBase() throws Exception {
-		Map<String, Long> minAddrMap = new HashMap<>();
-		Map<String, Long> maxAddrMap = new HashMap<>();
-		
-		BufferedReader reader = new BufferedReader(new FileReader(tracePath + "_base"));
-		String line;
-		while((line = reader.readLine()) != null) {
-			// Line parsing
-			String[] tokens = line.split(" ");
+    /**
+     * Get a register by name
+     * 
+     * @param name the name
+     * @return the register
+     */
+    protected Register reg(String name) {
+        return lang.getRegister(name);
+    }
+    
+    /**
+     * Parses the "_images" directory.
+     * 
+     * For -standalone traces, we explore the files in _images and create a Map<Pair<Filename, Offset>, File>
+     * @throws UnsupportedEncodingException
+     */
+    protected void parseImages() throws UnsupportedEncodingException {
+        imagesMap = new HashMap<>();
+        
+        File imagesDir = new File(tracePath + "_images");
+        for(File imageFile : imagesDir.listFiles()) {
+            String path = URLDecoder.decode(imageFile.getName(), "utf-8");
+            
+            if(imageFile.isDirectory()) {
+                // The regions are split in the traces, create an entry for each one
+                for(File regionFile : imageFile.listFiles()) {
+                    long offset = Long.parseUnsignedLong(regionFile.getName(), 16);
+                    imagesMap.put(new Pair<>(path, offset), regionFile);
+                }
+            } else {
+                // The whole image is contained in a single file
+                imagesMap.put(new Pair<>(path, 0L), imageFile);
+            }
+        }
+    }
+    
+    /**
+     * Parses the "_base" file
+     * 
+     * The file lists the different ELFs that are loaded in memory, similar to /proc/<pid>/maps.
+     * For each file, we create a Module. For each loaded program segment, we create a Region and fill it with the content from _images.
+     * 
+     * @throws Exception
+     */
+    protected void parseBase() throws Exception {
+        Map<String, Long> minAddrMap = new HashMap<>();
+        Map<String, Long> maxAddrMap = new HashMap<>();
+        
+        BufferedReader reader = new BufferedReader(new FileReader(tracePath + "_base"));
+        String line;
+        while((line = reader.readLine()) != null) {
+            // Line parsing
+            String[] tokens = line.split(" ");
 
-			String[] range = tokens[0].split("-");
-			long begin = Long.parseUnsignedLong(range[0], 16);
-			long end = Long.parseUnsignedLong(range[1], 16);
-			long offset = Long.parseUnsignedLong(tokens[1], 16);
-			String filename = tokens[2];
-			
-			File f = imagesMap.get(new Pair<>(filename, offset));
-			
-			// Create a region
-			String regionName = filename + "(" + Long.toUnsignedString(offset, 16) + ")";
-			AddressRange rng = rng(begin, end - 1);
-			memory.addRegion(regionName, Range.atLeast(0L), rng, TraceMemoryFlag.READ, TraceMemoryFlag.WRITE, TraceMemoryFlag.EXECUTE);
-			
-			// Fill the initial bytes
-			ByteProvider provider = new RandomAccessByteProvider(f);
-			byte[] bytes = provider.readBytes(0, f.length());
-			ByteBuffer buf = ByteBuffer.allocate((int) f.length());
-			buf.put(bytes);
-			memory.putBytes(0, rng.getMinAddress(), buf.flip());
-			provider.close();
-			
-			// Compute the min/max of vaddr for every file
-			if(Long.compareUnsigned(begin, minAddrMap.getOrDefault(filename, -1L)) < 0) {
-				minAddrMap.put(filename, begin);
-			}
-			if(Long.compareUnsigned(end, maxAddrMap.getOrDefault(filename, 0L)) > 0) {
-				maxAddrMap.put(filename, end);
-			}
-		}
-		
-		for(String filename : minAddrMap.keySet()) {
-			long minAddr = minAddrMap.get(filename);
-			long maxAddr = minAddrMap.get(filename);
-			AddressRange rng = rng(minAddr, maxAddr - 1);
-			modules.addLoadedModule(filename, filename, rng, 0);
-		}
-		
-		reader.close();
-	}
-	
-	/**
-	 * Parses the "_strace" file
-	 * 
-	 * For now, we only create a snapshot in the timeline.
-	 * 
-	 * @throws Exception
-	 */
-	protected void parseStrace() throws Exception {
-		BufferedReader reader = new BufferedReader(new FileReader(tracePath + "_strace"));
-		String line;
-		while((line = reader.readLine()) != null) {
-			String[] tokens = line.split(" ", 3);
-			int tick = Integer.parseInt(tokens[0]);
-			//int tid = Integer.parseInt(tokens[1]);
-			//String syscall = tokens[2];
-			timeManager.getSnapshot(tick, true);
-		}
-		reader.close();
-	}
-	
-	@Override
-	protected void run() throws Exception {
-		/*
-		 * As mentionned in issue #2398, the ask* function close the TaskMonitor.
-		 * If you want to check the progress, replace this line with a hardcoded path. 
-		 */
-		tracePath = askFile("Select a Qira trace file", "Load").getAbsolutePath();
-		
-		cspec = currentProgram.getCompilerSpec();
-		lang = currentProgram.getLanguage();
-		defaultSpace = lang.getAddressFactory().getDefaultAddressSpace();
+            String[] range = tokens[0].split("-");
+            long begin = Long.parseUnsignedLong(range[0], 16);
+            long end = Long.parseUnsignedLong(range[1], 16);
+            long offset = Long.parseUnsignedLong(tokens[1], 16);
+            String filename = tokens[2];
+            
+            File f = imagesMap.get(new Pair<>(filename, offset));
+            
+            // Create a region
+            String regionName = filename + "(" + Long.toUnsignedString(offset, 16) + ")";
+            AddressRange rng = rng(begin, end - 1);
+            memory.addRegion(regionName, Range.atLeast(0L), rng, TraceMemoryFlag.READ, TraceMemoryFlag.WRITE, TraceMemoryFlag.EXECUTE);
+            
+            // Fill the initial bytes
+            ByteProvider provider = new RandomAccessByteProvider(f);
+            byte[] bytes = provider.readBytes(0, f.length());
+            ByteBuffer buf = ByteBuffer.allocate((int) f.length());
+            buf.put(bytes);
+            memory.putBytes(0, rng.getMinAddress(), buf.flip());
+            provider.close();
+            
+            // Compute the min/max of vaddr for every file
+            if(Long.compareUnsigned(begin, minAddrMap.getOrDefault(filename, -1L)) < 0) {
+                minAddrMap.put(filename, begin);
+            }
+            if(Long.compareUnsigned(end, maxAddrMap.getOrDefault(filename, 0L)) > 0) {
+                maxAddrMap.put(filename, end);
+            }
+        }
+        
+        for(String filename : minAddrMap.keySet()) {
+            long minAddr = minAddrMap.get(filename);
+            long maxAddr = minAddrMap.get(filename);
+            AddressRange rng = rng(minAddr, maxAddr - 1);
+            modules.addLoadedModule(filename, filename, rng, 0);
+        }
+        
+        reader.close();
+    }
+    
+    /**
+     * Parses the "_strace" file
+     * 
+     * For now, we only create a snapshot in the timeline.
+     * 
+     * @throws Exception
+     */
+    protected void parseStrace() throws Exception {
+        BufferedReader reader = new BufferedReader(new FileReader(tracePath + "_strace"));
+        String line;
+        while((line = reader.readLine()) != null) {
+            String[] tokens = line.split(" ", 3);
+            int tick = Integer.parseInt(tokens[0]);
+            //int tid = Integer.parseInt(tokens[1]);
+            //String syscall = tokens[2];
+            timeManager.getSnapshot(tick, true);
+        }
+        reader.close();
+    }
+    
+    @Override
+    protected void run() throws Exception {
+        /*
+         * As mentionned in issue #2398, the ask* function close the TaskMonitor.
+         * If you want to check the progress, replace this line with a hardcoded path. 
+         */
+        tracePath = askFile("Select a Qira trace file", "Load").getAbsolutePath();
+        
+        cspec = currentProgram.getCompilerSpec();
+        lang = currentProgram.getLanguage();
+        defaultSpace = lang.getAddressFactory().getDefaultAddressSpace();
 
-		trace = new DBTrace("mytrace", cspec, this);
-		memory = trace.getMemoryManager();
-		modules = trace.getModuleManager();
-		threads = trace.getThreadManager();
-		timeManager = trace.getTimeManager();
-		manager = state.getTool().getService(DebuggerTraceManagerService.class);
+        trace = new DBTrace("mytrace", cspec, this);
+        memory = trace.getMemoryManager();
+        modules = trace.getModuleManager();
+        threads = trace.getThreadManager();
+        timeManager = trace.getTimeManager();
+        manager = state.getTool().getService(DebuggerTraceManagerService.class);
 
-		try (UndoableTransaction tid =
-				UndoableTransaction.start(trace, "Populating modules / regions", true)) {
-			
-			monitor.setMessage("Loading progam and libraries in memory");
-			parseImages();
-			parseBase();
-			
-			monitor.setMessage("Loading register/memory writes");
-			parseTrace();
-		}
-		
-		manager.openTrace(trace);
-		manager.activateTrace(trace);
+        try (UndoableTransaction tid =
+                UndoableTransaction.start(trace, "Populating modules / regions", true)) {
+            
+            monitor.setMessage("Loading progam and libraries in memory");
+            parseImages();
+            parseBase();
+            
+            monitor.setMessage("Loading register/memory writes");
+            parseTrace();
+        }
+        
+        manager.openTrace(trace);
+        manager.activateTrace(trace);
 
-		return;
-	
-	}
-	
-	/**
-	 * Parses the trace file containing the register/memory writes.
-	 * 
-	 * @throws Exception
-	 */
-	protected void parseTrace() throws Exception {
+        return;
+    
+    }
+    
+    /**
+     * Parses the trace file containing the register/memory writes.
+     * 
+     * @throws Exception
+     */
+    protected void parseTrace() throws Exception {
         RandomAccessFile aFile = new RandomAccessFile(tracePath, "r");
         
         FileChannel inChannel = aFile.getChannel();
         ByteBuffer buffer = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN);
-    	buffer.clear();
-    	
-    	// Read logstate
+        buffer.clear();
+        
+        // Read logstate
         inChannel.read(buffer);
         buffer.flip();
         int change_count = buffer.getInt();
@@ -358,74 +358,74 @@ public class PopulateTraceQiraCompatible extends GhidraScript {
         long first_tick = buffer.getInt();
         buffer.getInt(); // ppid
         buffer.getInt(); // pid
-    	buffer.clear();
-    	
-    	// Create thread
-		TraceThread th = threads.addThread("t0", Range.closed(first_tick, last_tick));
-		TraceMemoryRegisterSpace regspace = memory.getMemoryRegisterSpace(th, true);
-		
-		if(true) {
+        buffer.clear();
+        
+        // Create thread
+        TraceThread th = threads.addThread("t0", Range.closed(first_tick, last_tick));
+        TraceMemoryRegisterSpace regspace = memory.getMemoryRegisterSpace(th, true);
+        
+        if(true) {
 
-			int nInstructions = 0;
-			int nMemoryWrites = 0;
-			int nRegisterWrites = 0;
-			int nIgnored = 0;
-			Instant startTime = Instant.now();
+            int nInstructions = 0;
+            int nMemoryWrites = 0;
+            int nRegisterWrites = 0;
+            int nIgnored = 0;
+            Instant startTime = Instant.now();
 
-	    	Register rip = reg("RIP");
-	
-	        monitor.initialize(change_count);
-	        
-	        while(!(monitor.isCancelled()) && (inChannel.read(buffer) == 24)) {
-	        	// Read change
-	            buffer.flip();
-	            long addr = buffer.getLong();
-	            long data = buffer.getLong();
-	            int tick = buffer.getInt();
-	            int flags = buffer.getInt();
-	            
-	            // We assume that invalid records marks the end
-	            if((flags & IS_VALID) == 0)
-	            	break;
-	            
-	            if((flags & IS_START) == IS_START) {
-	            	// Instruction executed
-	            	RegisterValue ripValue = new RegisterValue(rip, BigInteger.valueOf(addr));
-	        		regspace.setValue(tick, ripValue);
-	        		nInstructions++;
-	            } else if((flags & IS_WRITE) == IS_WRITE) {
-	            	if((flags & IS_MEM) == IS_MEM) {
-		            	// Memory write
-	            		int size = (flags & SIZE_MASK) / 8;
-	            		buffer.position(8).limit(8 + size);
-	            		memory.putBytes(tick, addr(addr), buffer);
-	            		nMemoryWrites++;
-	            	} else {
-		            	// Register write
-	            		String regName = register_map.get(addr);
-		            	Register reg = reg(regName);
-		            	RegisterValue regValue = new RegisterValue(reg, BigInteger.valueOf(data));
-						regspace.setValue(tick, regValue);
-						nRegisterWrites++;
-	            	}
-	            } else {
-	            	nIgnored++;
-	            }
-	        	buffer.clear();
-	        	monitor.incrementProgress(1);
-	        }
-	        
-			Instant endTime = Instant.now();
-			Duration timeElapsed = Duration.between(startTime, endTime);
-			println("Import stats:");
-			println(" * Instructions:    " + nInstructions);
-			println(" * Register Writes: " + nRegisterWrites);
-			println(" * Memory Writes:   " + nMemoryWrites);
-			println(" * Ignored:         " + nIgnored);
-			println(" * Time elapsed:    " + timeElapsed.toString());
-		}
-		
+            Register rip = reg("RIP");
+    
+            monitor.initialize(change_count);
+            
+            while(!(monitor.isCancelled()) && (inChannel.read(buffer) == 24)) {
+                // Read change
+                buffer.flip();
+                long addr = buffer.getLong();
+                long data = buffer.getLong();
+                int tick = buffer.getInt();
+                int flags = buffer.getInt();
+                
+                // We assume that invalid records marks the end
+                if((flags & IS_VALID) == 0)
+                    break;
+                
+                if((flags & IS_START) == IS_START) {
+                    // Instruction executed
+                    RegisterValue ripValue = new RegisterValue(rip, BigInteger.valueOf(addr));
+                    regspace.setValue(tick, ripValue);
+                    nInstructions++;
+                } else if((flags & IS_WRITE) == IS_WRITE) {
+                    if((flags & IS_MEM) == IS_MEM) {
+                        // Memory write
+                        int size = (flags & SIZE_MASK) / 8;
+                        buffer.position(8).limit(8 + size);
+                        memory.putBytes(tick, addr(addr), buffer);
+                        nMemoryWrites++;
+                    } else {
+                        // Register write
+                        String regName = register_map.get(addr);
+                        Register reg = reg(regName);
+                        RegisterValue regValue = new RegisterValue(reg, BigInteger.valueOf(data));
+                        regspace.setValue(tick, regValue);
+                        nRegisterWrites++;
+                    }
+                } else {
+                    nIgnored++;
+                }
+                buffer.clear();
+                monitor.incrementProgress(1);
+            }
+            
+            Instant endTime = Instant.now();
+            Duration timeElapsed = Duration.between(startTime, endTime);
+            println("Import stats:");
+            println(" * Instructions:    " + nInstructions);
+            println(" * Register Writes: " + nRegisterWrites);
+            println(" * Memory Writes:   " + nMemoryWrites);
+            println(" * Ignored:         " + nIgnored);
+            println(" * Time elapsed:    " + timeElapsed.toString());
+        }
+        
         inChannel.close();
         aFile.close();
-	}
+    }
 }
