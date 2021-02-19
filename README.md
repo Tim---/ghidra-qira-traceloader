@@ -47,7 +47,14 @@ For this, we would need to get the start/end address of each one. There are seve
   * by parsing the `/proc/pid/maps` file (althought the heap/stack size might change);
   * by catching calls to `brk` or watching the lowest `rsp` value, which is probably a bad idea.
 
-Probably more limitations, that I don't remember off the top of my head.
+Memory regions are loaded with bad permissions. The qira tracers do not give the permissions of the regions mapped into memory. 
+The best thing to do is probably to load the ELF ourself into the trace based on the load address. This way, we know if the sections are rwx.
+
+Some things are probably written twice. The tracer saves all changes made to a register.
+So if the register is written several times in a tick (eg: on a library function), it will register that.
+We should parse it only once, and keep the last one.
+
+Oops, apparently my RIP is off-by-one. Changes happen before the instruction is executed. I should probably fix this :).
 
 Import stats
 ------------
