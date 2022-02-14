@@ -272,7 +272,7 @@ public class PopulateTraceQiraCompatible extends GhidraScript {
         
         for(String filename : minAddrMap.keySet()) {
             long minAddr = minAddrMap.get(filename);
-            long maxAddr = minAddrMap.get(filename);
+            long maxAddr = maxAddrMap.get(filename);
             AddressRange rng = rng(minAddr, maxAddr - 1);
             modules.addLoadedModule(filename, filename, rng, 0);
         }
